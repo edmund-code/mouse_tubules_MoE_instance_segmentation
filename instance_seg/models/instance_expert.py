@@ -5,14 +5,11 @@ This module provides the 4th expert network that produces pixel embeddings
 for discriminative instance segmentation.
 """
 
-import sys
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-# Add Semi-MoE to path for imports
-sys.path.insert(0, '/home/edmund/Desktop/mouse_tubules_MoE_instance_segmentation/Semi-MoE')
-from models.getnetwork import get_network
+from .getnetwork import get_network
 
 
 def get_instance_expert(

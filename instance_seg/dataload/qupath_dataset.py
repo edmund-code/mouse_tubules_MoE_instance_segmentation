@@ -41,6 +41,7 @@ class QuPathPatchDataset(Dataset):
         normalize: Optional[Callable] = None,
         supervised: bool = True,
         generate_labels_online: bool = True,
+        use_precomputed_labels: bool = True,
         boundary_width: int = 2,
         normalize_sdf: bool = True
     ):
@@ -59,6 +60,9 @@ class QuPathPatchDataset(Dataset):
             If True, load and return instance masks and derived labels.
         generate_labels_online : bool, default=True
             If True, generate semantic/boundary/SDF labels on-the-fly.
+        use_precomputed_labels : bool, default=True
+            If True, use precomputed labels from data_dir/boundary and data_dir/sdf
+            when available.
         boundary_width : int, default=2
             Width of boundaries when generating labels.
         normalize_sdf : bool, default=True
@@ -69,8 +73,10 @@ class QuPathPatchDataset(Dataset):
         self.normalize = normalize
         self.supervised = supervised
         self.generate_labels_online = generate_labels_online
+        self.use_precomputed_labels = use_precomputed_labels
         self.boundary_width = boundary_width
         self.normalize_sdf = normalize_sdf
+        self.has_precomputed_labels = False
         
         image_dir = self.data_dir / "images"
         if not image_dir.exists():
@@ -96,6 +102,44 @@ class QuPathPatchDataset(Dataset):
                 if not mask_path.exists():
                     raise ValueError(f"Mask not found for image {img_name}: {mask_path}")
                 self.mask_paths.append(str(mask_path))
+
+            self.boundary_paths = []
+            self.sdf_paths = []
+
+            if self.use_precomputed_labels:
+                boundary_dir = self.data_dir / "boundary"
+                sdf_dir = self.data_dir / "sdf"
+
+                if boundary_dir.exists() and sdf_dir.exists():
+                    missing_precomputed = []
+                    for img_path in self.image_paths:
+                        img_name = Path(img_path).stem
+                        boundary_path = boundary_dir / f"{img_name}.npy"
+                        sdf_path = sdf_dir / f"{img_name}.npy"
+
+                        if not boundary_path.exists() or not sdf_path.exists():
+                            missing_precomputed.append(img_name)
+                            self.boundary_paths.append("")
+                            self.sdf_paths.append("")
+                        else:
+                            self.boundary_paths.append(str(boundary_path))
+                            self.sdf_paths.append(str(sdf_path))
+
+                    self.has_precomputed_labels = len(missing_precomputed) == 0
+
+                    if missing_precomputed and not self.generate_labels_online:
+                        preview = ", ".join(missing_precomputed[:5])
+                        if len(missing_precomputed) > 5:
+                            preview += ", ..."
+                        raise ValueError(
+                            "Missing precomputed labels for images: "
+                            f"{preview}. Set generate_labels_online=True to fall back."
+                        )
+                elif not self.generate_labels_online:
+                    raise ValueError(
+                        f"Precomputed labels requested but directories are missing: "
+                        f"{boundary_dir} and/or {sdf_dir}"
+                    )
         else:
             self.mask_paths = []
     
@@ -112,13 +156,34 @@ class QuPathPatchDataset(Dataset):
         if self.supervised:
             instance_mask = np.load(self.mask_paths[idx])
             instance_mask = instance_mask.astype(np.int32)
+
+            if self.has_precomputed_labels:
+                boundary = np.load(self.boundary_paths[idx]).astype(np.float32)
+                sdf = np.load(self.sdf_paths[idx]).astype(np.float32)
+            else:
+                boundary = None
+                sdf = None
             
             if self.transform is not None:
-                transformed = self.transform(image=image, mask=instance_mask)
-                image = transformed['image']
-                instance_mask = transformed['mask']
-            
-            if self.generate_labels_online:
+                if self.has_precomputed_labels:
+                    transformed = self.transform(
+                        image=image,
+                        masks=[instance_mask, boundary, sdf]
+                    )
+                    image = transformed['image']
+                    instance_mask = transformed['masks'][0]
+                    boundary = transformed['masks'][1]
+                    sdf = transformed['masks'][2]
+                else:
+                    transformed = self.transform(image=image, mask=instance_mask)
+                    image = transformed['image']
+                    instance_mask = transformed['mask']
+
+            if self.has_precomputed_labels:
+                semantic_mask = (instance_mask > 0).astype(np.int64)
+                boundary = (boundary > 0.5).astype(np.int64)
+                sdf = sdf.astype(np.float32)
+            elif self.generate_labels_online:
                 labels = generate_all_labels(
                     instance_mask,
                     boundary_width=self.boundary_width,

@@ -1,0 +1,19 @@
+# Data artifacts
+data/
+
+# Training outputs
+runs/
+trained_models/
+checkpoints/
+
+# Python caches
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Jupyter
+.ipynb_checkpoints/
+
+# OS/editor noise
+.DS_Store
+.vscode/

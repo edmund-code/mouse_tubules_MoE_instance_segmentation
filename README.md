@@ -29,13 +29,19 @@ python scripts/prepare_dataset.py \
     --source_dir data/processed/all_patches \
     --output_dir data/processed
 
-# 3. Train
+# 3. Precompute SDF + boundary labels (recommended/default training path)
+python scripts/precompute_labels.py data/processed
+
+# 4. Train (uses precomputed labels by default)
 python train_instance.py \
     --data_dir data/processed \
     --batch_size 8 \
     --num_epochs 200
 
-# 4. Monitor
+# Optional: force online label generation instead of precomputed labels
+# python train_instance.py --data_dir data/processed --no-use_precomputed_labels
+
+# 5. Monitor
 tensorboard --logdir runs
 ```
 

@@ -6,6 +6,10 @@ This script extends the original Semi-MoE training to support instance segmentat
 by adding a 4th expert for instance embeddings.
 """
 
+import os
+# Set GPU device before any CUDA imports
+os.environ["CUDA_VISIBLE_DEVICES"] = "1"
+
 import torch
 import torch.nn as nn
 import torch.optim as optim
@@ -20,12 +24,6 @@ import numpy as np
 from pathlib import Path
 from tqdm import tqdm
 
-# Add Semi-MoE to path
-sys.path.insert(0, str(Path(__file__).parent / 'Semi-MoE'))
-
-# Import from Semi-MoE
-from loss.loss_function import segmentation_loss
-
 # Import from instance_seg
 from instance_seg.config.kidney_config import get_kidney_config, update_config
 from instance_seg.dataload.qupath_dataset import (
@@ -37,6 +35,7 @@ from instance_seg.dataload.qupath_dataset import (
 from instance_seg.models.instance_expert import create_all_experts
 from instance_seg.models.gating_network_4experts import get_gating_network_4experts
 from instance_seg.loss.embedding_loss import DiscriminativeLoss
+from instance_seg.loss.loss_function import segmentation_loss
 from instance_seg.inference.embedding_to_instances import EmbeddingClusterer
 from instance_seg.utils.instance_metrics import evaluate_batch
 
@@ -49,6 +48,12 @@ def parse_args():
     parser.add_argument('--data_dir', type=str, default='data/processed', help='Data directory')
     parser.add_argument('--batch_size', type=int, default=4, help='Batch size')
     parser.add_argument('--num_workers', type=int, default=4, help='Number of data loading workers')
+    parser.add_argument(
+        '--use_precomputed_labels',
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help='Use precomputed labels from split folders (sdf/ and boundary/)'
+    )
     
     # Model
     parser.add_argument('--network', type=str, default='unet', help='Base network architecture')
@@ -131,9 +136,10 @@ def train_epoch(models, gating_net, dataloaders, optimizers, loss_functions, dev
         seg_out, sdf_out, bnd_out, embed_out = gating_net(concat_feat)
         
         # Compute losses
-        loss_seg = segmentation_loss(seg_out, seg_masks)
+        seg_loss_fn = loss_functions['segmentation']
+        loss_seg = seg_loss_fn(seg_out, seg_masks)
         loss_sdf = nn.MSELoss()(sdf_out.squeeze(1), sdf_maps)
-        loss_bnd = segmentation_loss(bnd_out, bnd_masks)
+        loss_bnd = seg_loss_fn(bnd_out, bnd_masks)
         
         embed_loss_fn = loss_functions['embedding']
         embed_loss_dict = embed_loss_fn(embed_out, inst_masks)
@@ -261,14 +267,18 @@ def main():
         data_dir=os.path.join(args.data_dir, 'train_sup'),
         transform=train_transform,
         normalize=normalize,
-        supervised=True
+        supervised=True,
+        generate_labels_online=not args.use_precomputed_labels,
+        use_precomputed_labels=args.use_precomputed_labels
     )
     
     val_dataset = QuPathPatchDataset(
         data_dir=os.path.join(args.data_dir, 'val'),
         transform=val_transform,
         normalize=normalize,
-        supervised=True
+        supervised=True,
+        generate_labels_online=not args.use_precomputed_labels,
+        use_precomputed_labels=args.use_precomputed_labels
     )
     
     train_loader = DataLoader(
@@ -325,6 +335,7 @@ def main():
     optimizers = [optimizer]
     
     # Setup loss functions
+    seg_loss_fn = segmentation_loss(loss='CE', aux=False)
     embedding_loss = DiscriminativeLoss(
         delta_v=args.delta_v,
         delta_d=args.delta_d,
@@ -333,7 +344,10 @@ def main():
         gamma=0.001
     ).to(device)
     
-    loss_functions = {'embedding': embedding_loss}
+    loss_functions = {
+        'segmentation': seg_loss_fn,
+        'embedding': embedding_loss
+    }
     
     # Setup clusterer for validation
     clusterer = EmbeddingClusterer(

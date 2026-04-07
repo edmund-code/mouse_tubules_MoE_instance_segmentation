@@ -1,365 +1,203 @@
-"""
-QuPath GeoJSON Parser for Instance Segmentation.
+# instance_seg/utils/geojson_parser.py
 
-This module provides functions to parse QuPath GeoJSON exports and convert
-polygon annotations to instance segmentation masks.
+"""
+QuPath GeoJSON Annotation Parser for Instance Segmentation.
+
+This module provides utilities to parse QuPath GeoJSON annotation exports
+and convert them to instance segmentation masks.
 """
 
 import json
 from pathlib import Path
-from typing import List, Tuple, Dict, Optional, Union
-
+from typing import List, Dict, Tuple, Optional, Union
 import numpy as np
-import cv2
 from shapely.geometry import shape, box, Polygon, MultiPolygon
-from shapely.geometry.base import BaseGeometry
-from shapely import STRtree
-
-
-def load_qupath_geojson(geojson_path: str) -> dict:
-    """
-    Load a QuPath GeoJSON file from disk.
-    
-    Parameters
-    ----------
-    geojson_path : str
-        Path to the .geojson file exported from QuPath.
-    
-    Returns
-    -------
-    dict
-        Parsed GeoJSON as a Python dictionary with structure:
-        {
-            "type": "FeatureCollection",
-            "features": [
-                {
-                    "type": "Feature",
-                    "geometry": {
-                        "type": "Polygon",
-                        "coordinates": [[[x1, y1], [x2, y2], ...]]
-                    },
-                    "properties": {
-                        "classification": {"name": "Tubule"},
-                        ...
-                    }
-                },
-                ...
-            ]
-        }
-    
-    Raises
-    ------
-    FileNotFoundError
-        If geojson_path does not exist.
-    json.JSONDecodeError
-        If file is not valid JSON.
-    """
-    geojson_path = Path(geojson_path)
-    if not geojson_path.exists():
-        raise FileNotFoundError(f"GeoJSON file not found: {geojson_path}")
-    
-    with open(geojson_path, 'r') as f:
-        geojson_data = json.load(f)
-    
-    if geojson_data.get("type") != "FeatureCollection":
-        raise ValueError(f"Invalid GeoJSON: expected type 'FeatureCollection', got '{geojson_data.get('type')}'")
-    
-    if "features" not in geojson_data or not isinstance(geojson_data["features"], list):
-        raise ValueError("Invalid GeoJSON: 'features' key missing or not a list")
-    
-    return geojson_data
-
-
-def filter_annotations_by_class(
-    geojson_data: dict,
-    class_names: List[str],
-    include_unclassified: bool = False
-) -> List[dict]:
-    """
-    Filter GeoJSON features by classification name.
-    
-    Parameters
-    ----------
-    geojson_data : dict
-        Parsed GeoJSON dictionary from load_qupath_geojson().
-    class_names : List[str]
-        List of classification names to include (e.g., ["Tubule", "tubule", "Proximal", "Distal"]).
-        Matching is case-insensitive.
-    include_unclassified : bool, default=False
-        If True, include annotations without a classification.
-    
-    Returns
-    -------
-    List[dict]
-        List of feature dictionaries that match the filter criteria.
-        Each feature has "geometry" and "properties" keys.
-    """
-    class_names_lower = [name.lower() for name in class_names]
-    filtered = []
-    
-    for feature in geojson_data.get("features", []):
-        properties = feature.get("properties", {})
-        classification = properties.get("classification")
-        
-        if classification is None:
-            if include_unclassified:
-                filtered.append(feature)
-        else:
-            class_name = classification.get("name", "")
-            if class_name.lower() in class_names_lower:
-                filtered.append(feature)
-    
-    return filtered
-
-
-def polygon_to_shapely(geometry: dict) -> Optional[BaseGeometry]:
-    """
-    Convert GeoJSON geometry to Shapely geometry object.
-    
-    Parameters
-    ----------
-    geometry : dict
-        GeoJSON geometry dictionary with "type" and "coordinates" keys.
-        Supported types: "Polygon", "MultiPolygon"
-    
-    Returns
-    -------
-    shapely.geometry.Polygon or shapely.geometry.MultiPolygon or None
-        Shapely geometry object, or None if geometry is invalid/empty.
-    """
-    try:
-        geom = shape(geometry)
-        
-        if not geom.is_valid:
-            geom = geom.buffer(0)
-        
-        if geom.is_empty:
-            return None
-            
-        return geom
-    except Exception:
-        return None
-
-
-def get_annotations_in_region(
-    annotations: List[dict],
-    region_bounds: Tuple[float, float, float, float],
-    min_overlap_ratio: float = 0.1
-) -> List[Tuple[dict, BaseGeometry]]:
-    """
-    Filter annotations that overlap with a specified rectangular region.
-    
-    Parameters
-    ----------
-    annotations : List[dict]
-        List of GeoJSON feature dictionaries.
-    region_bounds : Tuple[float, float, float, float]
-        Bounding box as (x_min, y_min, x_max, y_max) in pixel coordinates.
-    min_overlap_ratio : float, default=0.1
-        Minimum ratio of annotation area that must be within region to be included.
-        Value between 0 and 1.
-    
-    Returns
-    -------
-    List[Tuple[dict, shapely.geometry]]
-        List of tuples containing (original_annotation, clipped_shapely_geometry).
-        Geometries are clipped to the region bounds.
-    """
-    region_box = box(*region_bounds)
-    results = []
-    
-    for annotation in annotations:
-        geom = polygon_to_shapely(annotation.get("geometry", {}))
-        if geom is None:
-            continue
-        
-        if not region_box.intersects(geom):
-            continue
-        
-        intersection = region_box.intersection(geom)
-        if intersection.is_empty:
-            continue
-        
-        overlap_ratio = intersection.area / geom.area
-        if overlap_ratio >= min_overlap_ratio:
-            results.append((annotation, intersection))
-    
-    return results
-
-
-def create_instance_mask(
-    geometries: List[BaseGeometry],
-    mask_shape: Tuple[int, int],
-    offset: Tuple[float, float] = (0, 0)
-) -> np.ndarray:
-    """
-    Create an instance segmentation mask from a list of Shapely geometries.
-    
-    Parameters
-    ----------
-    geometries : List[shapely.geometry]
-        List of Shapely polygon geometries. Each will be assigned a unique instance ID.
-    mask_shape : Tuple[int, int]
-        Output mask shape as (height, width).
-    offset : Tuple[float, float], default=(0, 0)
-        Offset to subtract from geometry coordinates as (x_offset, y_offset).
-        Used when creating masks for patches extracted from larger images.
-    
-    Returns
-    -------
-    np.ndarray
-        Instance mask of shape (height, width) with dtype np.int32.
-        Background = 0, instances = 1, 2, 3, ...
-    """
-    mask = np.zeros(mask_shape, dtype=np.int32)
-    x_offset, y_offset = offset
-    
-    for idx, geom in enumerate(geometries):
-        instance_id = idx + 1
-        
-        if isinstance(geom, Polygon):
-            polygons = [geom]
-        elif isinstance(geom, MultiPolygon):
-            polygons = list(geom.geoms)
-        else:
-            continue
-        
-        for poly in polygons:
-            if poly.is_empty:
-                continue
-            
-            exterior_coords = np.array(poly.exterior.coords, dtype=np.float32)
-            exterior_coords[:, 0] -= x_offset
-            exterior_coords[:, 1] -= y_offset
-            exterior_coords = exterior_coords.astype(np.int32)
-            
-            cv2.fillPoly(mask, [exterior_coords], instance_id)
-            
-            for interior in poly.interiors:
-                interior_coords = np.array(interior.coords, dtype=np.float32)
-                interior_coords[:, 0] -= x_offset
-                interior_coords[:, 1] -= y_offset
-                interior_coords = interior_coords.astype(np.int32)
-                cv2.fillPoly(mask, [interior_coords], 0)
-    
-    return mask
-
-
-def process_wsi_geojson(
-    geojson_path: str,
-    class_names: List[str] = ["Tubule"]
-) -> List[Tuple[BaseGeometry, dict]]:
-    """
-    High-level function to load and process a QuPath GeoJSON file for a WSI.
-    
-    Parameters
-    ----------
-    geojson_path : str
-        Path to the GeoJSON file.
-    class_names : List[str], default=["Tubule"]
-        Classification names to include.
-    
-    Returns
-    -------
-    List[Tuple[shapely.geometry, dict]]
-        List of tuples containing (shapely_geometry, properties_dict) for each annotation.
-    """
-    geojson_data = load_qupath_geojson(geojson_path)
-    filtered_annotations = filter_annotations_by_class(geojson_data, class_names)
-    
-    results = []
-    for annotation in filtered_annotations:
-        geom = polygon_to_shapely(annotation.get("geometry", {}))
-        if geom is not None:
-            properties = annotation.get("properties", {})
-            results.append((geom, properties))
-    
-    return results
+from shapely.validation import make_valid
+import cv2
+from tqdm import tqdm
 
 
 class QuPathAnnotationHandler:
     """
-    Class to manage QuPath annotations for a single WSI.
+    Handler for QuPath GeoJSON annotations.
     
-    This class provides efficient spatial queries for annotations within regions,
-    using an R-tree spatial index for performance with large numbers of annotations.
+    Parses GeoJSON files exported from QuPath and provides methods to:
+    - Filter annotations by class
+    - Query annotations by spatial region
+    - Generate instance segmentation masks
     
-    Attributes
+    Parameters
     ----------
     geojson_path : str
-        Path to the source GeoJSON file.
-    annotations : List[Tuple[shapely.geometry, dict]]
-        List of (geometry, properties) tuples.
-    spatial_index : shapely.STRtree
-        Spatial index for efficient region queries.
+        Path to GeoJSON file exported from QuPath.
+    class_names : list of str, optional
+        List of class names to include. If None, includes all classes.
     """
     
-    def __init__(self, geojson_path: str, class_names: List[str] = ["Tubule"]):
-        """
-        Initialize handler by loading GeoJSON and building spatial index.
+    def __init__(self, geojson_path: str, class_names: Optional[List[str]] = None):
+        self.geojson_path = Path(geojson_path)
+        self.class_names = class_names
+        self.annotations = []
+        self.geometries = []
+        self.spatial_index = None
         
-        Parameters
-        ----------
-        geojson_path : str
-            Path to QuPath GeoJSON file.
-        class_names : List[str], default=["Tubule"]
-            Classification names to include.
-        """
-        self.geojson_path = geojson_path
-        self.annotations = process_wsi_geojson(geojson_path, class_names)
+        self._load_annotations()
+        self._build_spatial_index()
+    
+    def _load_annotations(self) -> None:
+        """Load and parse GeoJSON file."""
+        with open(self.geojson_path, 'r') as f:
+            data = json.load(f)
         
-        if len(self.annotations) > 0:
-            geometries = [geom for geom, _ in self.annotations]
-            self.spatial_index = STRtree(geometries)
-            self.geom_to_idx = {id(geom): idx for idx, (geom, _) in enumerate(self.annotations)}
-        else:
+        features = data.get('features', data) if isinstance(data, dict) else data
+        
+        valid_count = 0
+        invalid_count = 0
+        skipped_class_count = 0
+        
+        for idx, feature in enumerate(features):
+            if not isinstance(feature, dict):
+                continue
+            
+            # Get properties
+            properties = feature.get('properties', {})
+            classification = properties.get('classification', {})
+            
+            # Handle different QuPath export formats
+            if isinstance(classification, dict):
+                class_name = classification.get('name', 'Unknown')
+            else:
+                class_name = str(classification) if classification else 'Unknown'
+            
+            # Filter by class names
+            if self.class_names is not None:
+                # Case-insensitive matching
+                if not any(cn.lower() == class_name.lower() for cn in self.class_names):
+                    skipped_class_count += 1
+                    continue
+            
+            # Parse geometry
+            geometry_data = feature.get('geometry')
+            if geometry_data is None:
+                invalid_count += 1
+                continue
+            
+            try:
+                geom = shape(geometry_data)
+                
+                # Validate and fix geometry if needed
+                if not geom.is_valid:
+                    geom = make_valid(geom)
+                
+                # Skip empty geometries
+                if geom.is_empty:
+                    invalid_count += 1
+                    continue
+                
+                # Handle GeometryCollection from make_valid
+                if geom.geom_type == 'GeometryCollection':
+                    # Extract polygons from collection
+                    polygons = [g for g in geom.geoms if g.geom_type in ('Polygon', 'MultiPolygon')]
+                    if not polygons:
+                        invalid_count += 1
+                        continue
+                    if len(polygons) == 1:
+                        geom = polygons[0]
+                    else:
+                        geom = MultiPolygon(polygons)
+                
+                # Ensure we have a valid polygon-type geometry
+                if geom.geom_type not in ('Polygon', 'MultiPolygon'):
+                    invalid_count += 1
+                    continue
+                
+                self.annotations.append({
+                    'id': valid_count,
+                    'class_name': class_name,
+                    'properties': properties
+                })
+                self.geometries.append(geom)
+                valid_count += 1
+                
+            except Exception as e:
+                invalid_count += 1
+                continue
+        
+        print(f"  Loaded {valid_count} valid annotations")
+        if invalid_count > 0:
+            print(f"  Skipped {invalid_count} invalid/empty geometries")
+        if skipped_class_count > 0:
+            print(f"  Skipped {skipped_class_count} annotations (class filter)")
+    
+    def _build_spatial_index(self) -> None:
+        """Build R-tree spatial index for fast region queries."""
+        try:
+            from rtree import index
+            self.spatial_index = index.Index()
+            for idx, geom in enumerate(self.geometries):
+                self.spatial_index.insert(idx, geom.bounds)
+        except ImportError:
+            print("  Warning: rtree not installed. Spatial queries will be slower.")
             self.spatial_index = None
-            self.geom_to_idx = {}
+    
+    def __len__(self) -> int:
+        return len(self.annotations)
     
     def get_instances_in_region(
-        self,
+        self, 
         bounds: Tuple[float, float, float, float],
         min_overlap: float = 0.1
-    ) -> List[Tuple[int, BaseGeometry]]:
+    ) -> List[Tuple[int, any]]:
         """
-        Get instances overlapping a region using spatial index.
+        Get all instances that overlap with a region.
         
         Parameters
         ----------
-        bounds : Tuple
-            Region as (x_min, y_min, x_max, y_max).
+        bounds : tuple
+            (min_x, min_y, max_x, max_y) bounding box.
         min_overlap : float
-            Minimum overlap ratio to include instance.
+            Minimum overlap ratio (intersection / instance area) to include.
         
         Returns
         -------
-        List[Tuple[int, shapely.geometry]]
-            List of (instance_id, clipped_geometry) tuples.
-            instance_id is 1-indexed (0 reserved for background).
+        list of tuples
+            (instance_id, geometry) pairs for overlapping instances.
         """
-        if self.spatial_index is None or len(self.annotations) == 0:
-            return []
+        min_x, min_y, max_x, max_y = bounds
+        region_box = box(min_x, min_y, max_x, max_y)
         
-        region_box = box(*bounds)
-        candidate_geoms = self.spatial_index.query(region_box)
+        # Get candidate indices using spatial index
+        if self.spatial_index is not None:
+            candidates = list(self.spatial_index.intersection(bounds))
+        else:
+            # Fall back to checking all geometries
+            candidates = range(len(self.geometries))
         
-        results = []
-        for geom in candidate_geoms:
-            if not region_box.intersects(geom):
+        instances = []
+        for idx in candidates:
+            geom = self.geometries[idx]
+            
+            # Safety check - ensure geom is valid
+            if geom is None or geom.is_empty:
                 continue
             
-            intersection = region_box.intersection(geom)
-            if intersection.is_empty:
+            try:
+                if not region_box.intersects(geom):
+                    continue
+                
+                intersection = region_box.intersection(geom)
+                if intersection.is_empty:
+                    continue
+                
+                overlap_ratio = intersection.area / geom.area if geom.area > 0 else 0
+                
+                if overlap_ratio >= min_overlap:
+                    instances.append((self.annotations[idx]['id'], geom))
+            except Exception as e:
+                # Skip problematic geometries
                 continue
-            
-            overlap_ratio = intersection.area / geom.area
-            if overlap_ratio >= min_overlap:
-                idx = self.geom_to_idx.get(id(geom))
-                if idx is not None:
-                    instance_id = idx + 1
-                    results.append((instance_id, intersection))
         
-        return results
+        return instances
     
     def create_mask_for_region(
         self,
@@ -368,27 +206,122 @@ class QuPathAnnotationHandler:
         min_overlap: float = 0.1
     ) -> np.ndarray:
         """
-        Create instance mask for a region.
+        Create instance segmentation mask for a region.
         
         Parameters
         ----------
-        bounds : Tuple
-            Region as (x_min, y_min, x_max, y_max).
-        mask_shape : Tuple[int, int]
-            Output mask shape as (height, width).
+        bounds : tuple
+            (min_x, min_y, max_x, max_y) bounding box in WSI coordinates.
+        mask_shape : tuple
+            (height, width) of output mask.
         min_overlap : float
             Minimum overlap ratio to include instance.
         
         Returns
         -------
         np.ndarray
-            Instance mask of shape (height, width).
+            Instance mask of shape (H, W) with unique integer IDs per instance.
         """
+        min_x, min_y, max_x, max_y = bounds
+        height, width = mask_shape
+        
+        # Scale factors
+        scale_x = width / (max_x - min_x)
+        scale_y = height / (max_y - min_y)
+        
+        mask = np.zeros((height, width), dtype=np.int32)
+        
         instances = self.get_instances_in_region(bounds, min_overlap)
-        geometries = [geom for _, geom in instances]
-        offset = (bounds[0], bounds[1])
-        return create_instance_mask(geometries, mask_shape, offset)
+        
+        for instance_id, geom in instances:
+            try:
+                # Clip geometry to region
+                region_box = box(min_x, min_y, max_x, max_y)
+                clipped_geom = geom.intersection(region_box)
+                
+                if clipped_geom.is_empty:
+                    continue
+                
+                # Convert to mask coordinates
+                instance_mask = self._geometry_to_mask(
+                    clipped_geom, 
+                    mask_shape,
+                    offset=(min_x, min_y),
+                    scale=(scale_x, scale_y)
+                )
+                
+                # Add to mask (instance_id + 1 to reserve 0 for background)
+                mask[instance_mask > 0] = instance_id + 1
+                
+            except Exception as e:
+                continue
+        
+        return mask
     
-    def __len__(self) -> int:
-        """Return total number of annotations."""
-        return len(self.annotations)
+    def _geometry_to_mask(
+        self,
+        geom,
+        mask_shape: Tuple[int, int],
+        offset: Tuple[float, float],
+        scale: Tuple[float, float]
+    ) -> np.ndarray:
+        """Convert Shapely geometry to binary mask."""
+        height, width = mask_shape
+        mask = np.zeros((height, width), dtype=np.uint8)
+        
+        def polygon_to_coords(poly):
+            """Convert polygon to OpenCV-compatible coordinates."""
+            exterior_coords = np.array(poly.exterior.coords)
+            # Transform to mask coordinates
+            exterior_coords[:, 0] = (exterior_coords[:, 0] - offset[0]) * scale[0]
+            exterior_coords[:, 1] = (exterior_coords[:, 1] - offset[1]) * scale[1]
+            return exterior_coords.astype(np.int32)
+        
+        try:
+            if geom.geom_type == 'Polygon':
+                coords = polygon_to_coords(geom)
+                cv2.fillPoly(mask, [coords], 1)
+                
+                # Handle holes
+                for interior in geom.interiors:
+                    hole_coords = np.array(interior.coords)
+                    hole_coords[:, 0] = (hole_coords[:, 0] - offset[0]) * scale[0]
+                    hole_coords[:, 1] = (hole_coords[:, 1] - offset[1]) * scale[1]
+                    cv2.fillPoly(mask, [hole_coords.astype(np.int32)], 0)
+                    
+            elif geom.geom_type == 'MultiPolygon':
+                for poly in geom.geoms:
+                    coords = polygon_to_coords(poly)
+                    cv2.fillPoly(mask, [coords], 1)
+                    
+                    for interior in poly.interiors:
+                        hole_coords = np.array(interior.coords)
+                        hole_coords[:, 0] = (hole_coords[:, 0] - offset[0]) * scale[0]
+                        hole_coords[:, 1] = (hole_coords[:, 1] - offset[1]) * scale[1]
+                        cv2.fillPoly(mask, [hole_coords.astype(np.int32)], 0)
+        except Exception as e:
+            pass
+        
+        return mask
+
+
+def load_qupath_annotations(
+    geojson_path: str,
+    class_names: Optional[List[str]] = None
+) -> QuPathAnnotationHandler:
+    """
+    Convenience function to load QuPath annotations.
+    
+    Parameters
+    ----------
+    geojson_path : str
+        Path to GeoJSON file.
+    class_names : list of str, optional
+        Class names to filter.
+    
+    Returns
+    -------
+    QuPathAnnotationHandler
+        Loaded annotation handler.
+    """
+    return QuPathAnnotationHandler(geojson_path, class_names)
