@@ -2,23 +2,6 @@
 
 This project extends the Semi-MoE framework to support instance segmentation of kidney tubules using QuPath GeoJSON annotations and TIF whole slide images.
 
-## ✅ Implementation Status: COMPLETE
-
-All 12 modules have been successfully implemented:
-
-- ✅ Module 1: GeoJSON Parser
-- ✅ Module 2: Label Generation
-- ✅ Module 3: Embedding Loss
-- ✅ Module 4: QuPath Dataset
-- ✅ Module 5: Instance Expert Model
-- ✅ Module 6: 4-Expert Gating Network
-- ✅ Module 7: Instance Metrics
-- ✅ Module 8: Embedding to Instances
-- ✅ Module 9: Configuration
-- ✅ Module 10: Patch Extraction Script
-- ✅ Module 11: Dataset Preparation Script
-- ✅ Module 12: Training Script
-
 ## Overview
 
 The implementation adds a 4th expert (instance embedding head) to the original 3-expert Semi-MoE architecture, enabling pixel-level instance discrimination through discriminative embedding learning.
