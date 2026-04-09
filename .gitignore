@@ -1,10 +1,12 @@
 # Data artifacts
 data/
+finetune_data/
 
 # Training outputs
 runs/
 trained_models/
 checkpoints/
+outputs/
 
 # Python caches
 __pycache__/
@@ -17,3 +19,5 @@ __pycache__/
 # OS/editor noise
 .DS_Store
 .vscode/
+codex-autoresearch/
+.agents/

@@ -129,6 +129,28 @@ class DiceLoss(nn.Module):
             return self._base_forward(output, target_one_hot, valid_mask)
 
 
+class DiceCrossEntropyLoss(nn.Module):
+    """Blend Dice and Cross-Entropy for more stable dense supervision."""
+
+    def __init__(
+        self,
+        aux: bool = False,
+        aux_weight: float = 0.4,
+        ignore_index: int = -1,
+        dice_weight: float = 0.5,
+        ce_weight: float = 0.5,
+        **kwargs
+    ):
+        super().__init__()
+        self.dice = DiceLoss(aux=aux, aux_weight=aux_weight, ignore_index=ignore_index, **kwargs)
+        self.ce = MixSoftmaxCrossEntropyLoss(aux=aux, aux_weight=aux_weight, ignore_index=ignore_index)
+        self.dice_weight = dice_weight
+        self.ce_weight = ce_weight
+
+    def forward(self, output, target):
+        return self.dice_weight * self.dice(output, target) + self.ce_weight * self.ce(output, target)
+
+
 def softmax_mse_loss(input_logits, target_logits, sigmoid=False):
     """Takes softmax on both sides and returns MSE loss
     Note:
@@ -208,6 +230,83 @@ class CustomKLLoss(_Loss):
             torch.log(torch.mul(std, std))) - 1
 
 
+class AdaptiveTaskWeighting(nn.Module):
+    """Adaptive uncertainty weighting for Semi-MoE task losses."""
+
+    def __init__(self, gamma: float = 0.4):
+        super().__init__()
+        self.gamma = gamma
+        self.log_sigma = nn.ParameterDict({
+            'seg': nn.Parameter(torch.zeros(1)),
+            'sdf': nn.Parameter(torch.zeros(1)),
+            'bnd': nn.Parameter(torch.zeros(1)),
+            'instance': nn.Parameter(torch.zeros(1)),
+        })
+
+    def forward(self, task_losses):
+        total = 0.0
+        weighted_losses = {}
+        for name, loss in task_losses.items():
+            sigma = self.log_sigma[name]
+            weighted = torch.exp(-sigma) * loss
+            weighted_losses[name] = weighted
+            total = total + weighted
+
+        reg = self.gamma * sum(torch.exp(param) for param in self.log_sigma.values())
+        total = total + reg
+        return total, weighted_losses, reg
+
+
+def compute_sdf_loss(prediction, target):
+    """Paper-style SDF regression loss with tanh projection."""
+    return F.mse_loss(torch.tanh(prediction.squeeze(1)), target)
+
+
+def compute_supervised_task_losses(outputs, seg_masks, sdf_maps, bnd_masks, inst_masks, loss_functions):
+    """Compute labeled losses for expert heads and gated heads."""
+    seg_loss_fn = loss_functions['segmentation']
+    embed_loss_fn = loss_functions['embedding']
+
+    expert = outputs['expert']
+    gated = outputs['gated']
+
+    expert_embed = embed_loss_fn(expert['instance'], inst_masks)
+    gated_embed = embed_loss_fn(gated['instance'], inst_masks)
+
+    task_losses = {
+        'seg': seg_loss_fn(expert['seg'], seg_masks) + seg_loss_fn(gated['seg'], seg_masks),
+        'sdf': compute_sdf_loss(expert['sdf'], sdf_maps) + compute_sdf_loss(gated['sdf'], sdf_maps),
+        'bnd': seg_loss_fn(expert['bnd'], bnd_masks) + seg_loss_fn(gated['bnd'], bnd_masks),
+        'instance': expert_embed['loss'] + gated_embed['loss'],
+    }
+
+    details = {
+        'expert_instance_var': expert_embed['var_loss'],
+        'expert_instance_dist': expert_embed['dist_loss'],
+        'gated_instance_var': gated_embed['var_loss'],
+        'gated_instance_dist': gated_embed['dist_loss'],
+    }
+    return task_losses, details
+
+
+def compute_unsupervised_task_losses(outputs, loss_functions):
+    """Compute unlabeled losses using pseudo-labels from gated outputs."""
+    seg_loss_fn = loss_functions['segmentation']
+    expert = outputs['expert']
+    gated = outputs['gated']
+
+    pseudo_seg = torch.argmax(gated['seg'].detach(), dim=1)
+    pseudo_bnd = torch.argmax(gated['bnd'].detach(), dim=1)
+    pseudo_sdf = torch.tanh(gated['sdf'].detach().squeeze(1))
+
+    return {
+        'seg': seg_loss_fn(expert['seg'], pseudo_seg),
+        'sdf': compute_sdf_loss(expert['sdf'], pseudo_sdf),
+        'bnd': seg_loss_fn(expert['bnd'], pseudo_bnd),
+        'instance': torch.zeros((), device=expert['seg'].device, dtype=expert['seg'].dtype),
+    }
+
+
 def segmentation_loss(loss='CE', aux=False, **kwargs):
     """
     Factory function to create segmentation loss.
@@ -228,6 +327,12 @@ def segmentation_loss(loss='CE', aux=False, **kwargs):
     """
     if loss == 'dice' or loss == 'DICE':
         seg_loss = DiceLoss(aux=aux)
+    elif loss == 'dicece' or loss == 'DICECE':
+        seg_loss = DiceCrossEntropyLoss(
+            aux=aux,
+            dice_weight=kwargs.get('dice_weight', 0.5),
+            ce_weight=kwargs.get('ce_weight', 0.5),
+        )
     elif loss == 'crossentropy' or loss == 'CE':
         seg_loss = MixSoftmaxCrossEntropyLoss(aux=aux)
     elif loss == 'bce':

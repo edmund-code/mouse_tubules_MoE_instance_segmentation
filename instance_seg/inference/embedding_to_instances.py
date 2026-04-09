@@ -19,30 +19,44 @@ except ImportError:
 def cluster_embeddings_meanshift(
     embeddings: np.ndarray,
     bandwidth: float = 0.5,
-    min_bin_freq: int = 5
+    min_bin_freq: int = 5,
+    max_pixels: int = 5000  # NEW: limit pixels for speed
 ) -> np.ndarray:
     """
-    Cluster embeddings using Mean Shift algorithm.
-    
-    Parameters
-    ----------
-    embeddings : np.ndarray
-        Embedding vectors of shape (N, E) where N is number of pixels and E is embedding dim.
-    bandwidth : float, default=0.5
-        Bandwidth parameter for mean shift. Controls cluster size.
-    min_bin_freq : int, default=5
-        Minimum number of points in a cluster.
-    
-    Returns
-    -------
-    np.ndarray
-        Cluster labels of shape (N,). Each unique label is an instance.
+    Cluster embeddings using Mean Shift algorithm with downsampling for speed.
     """
     if embeddings.shape[0] == 0:
         return np.array([])
     
+    n_pixels = embeddings.shape[0]
+    
+    # Downsample if too many pixels
+    if n_pixels > max_pixels:
+        # Random sample for clustering
+        sample_idx = np.random.choice(n_pixels, max_pixels, replace=False)
+        sampled_emb = embeddings[sample_idx]
+    else:
+        sampled_emb = embeddings
+        sample_idx = None
+    
+    # Cluster sampled points
     ms = MeanShift(bandwidth=bandwidth, bin_seeding=True, min_bin_freq=min_bin_freq, n_jobs=-1)
-    labels = ms.fit_predict(embeddings)
+    
+    try:
+        sampled_labels = ms.fit_predict(sampled_emb)
+    except ValueError:
+        # Bandwidth too small, return all as one instance
+        return np.ones(n_pixels, dtype=np.int32)
+    
+    # If downsampled, assign remaining pixels to nearest cluster center
+    if sample_idx is not None:
+        cluster_centers = ms.cluster_centers_
+        
+        # Assign all pixels to nearest center (fast!)
+        from sklearn.metrics import pairwise_distances_argmin
+        labels = pairwise_distances_argmin(embeddings, cluster_centers)
+    else:
+        labels = sampled_labels
     
     return labels
 

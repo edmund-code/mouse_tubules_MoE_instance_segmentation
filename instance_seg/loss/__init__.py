@@ -7,6 +7,10 @@ from .loss_function import (
     DiceLoss,
     BCELossBoud,
     CustomKLLoss,
+    AdaptiveTaskWeighting,
+    compute_sdf_loss,
+    compute_supervised_task_losses,
+    compute_unsupervised_task_losses,
     softmax_mse_loss,
     entropy_loss
 )
@@ -18,6 +22,10 @@ __all__ = [
     'DiceLoss',
     'BCELossBoud',
     'CustomKLLoss',
+    'AdaptiveTaskWeighting',
+    'compute_sdf_loss',
+    'compute_supervised_task_losses',
+    'compute_unsupervised_task_losses',
     'softmax_mse_loss',
     'entropy_loss'
 ]

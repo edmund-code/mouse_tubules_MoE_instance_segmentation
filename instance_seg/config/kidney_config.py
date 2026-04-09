@@ -37,7 +37,7 @@ def get_kidney_config() -> Dict[str, Any]:
         # Image properties
         "IN_CHANNELS": 3,
         "NUM_CLASSES": 2,
-        "PATCH_SIZE": 256,
+        "PATCH_SIZE": 512,
         
         # Normalization (ImageNet defaults - can be updated with dataset stats)
         "MEAN": [0.485, 0.456, 0.406],

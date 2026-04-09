@@ -330,13 +330,13 @@ class QuPathUnsupervisedDataset(Dataset):
         }
 
 
-def get_train_transforms(patch_size: int = 256) -> A.Compose:
+def get_train_transforms(patch_size: int = 512, preset: str = "baseline") -> A.Compose:
     """
     Create training augmentation pipeline.
     
     Parameters
     ----------
-    patch_size : int, default=256
+    patch_size : int, default=512
         Size of training patches.
     
     Returns
@@ -344,24 +344,51 @@ def get_train_transforms(patch_size: int = 256) -> A.Compose:
     albumentations.Compose
         Augmentation pipeline.
     """
-    return A.Compose([
+    transforms = [
         A.HorizontalFlip(p=0.5),
         A.VerticalFlip(p=0.5),
         A.RandomRotate90(p=0.5),
         A.Transpose(p=0.5),
-        A.ColorJitter(
-            brightness=0.2,
-            contrast=0.2,
-            saturation=0.2,
-            hue=0.1,
-            p=0.5
-        ),
-        A.GaussNoise(var_limit=(10.0, 50.0), p=0.2),
-        A.GaussianBlur(blur_limit=(3, 5), p=0.2),
-    ])
+    ]
+
+    if preset == "strong":
+        transforms.extend([
+            A.ShiftScaleRotate(
+                shift_limit=0.04,
+                scale_limit=0.10,
+                rotate_limit=20,
+                border_mode=4,
+                p=0.6,
+            ),
+            A.OneOf([
+                A.ColorJitter(brightness=0.25, contrast=0.25, saturation=0.2, hue=0.08),
+                A.RandomBrightnessContrast(brightness_limit=0.20, contrast_limit=0.20),
+                A.CLAHE(clip_limit=2.0, tile_grid_size=(8, 8)),
+                A.RandomGamma(gamma_limit=(80, 120)),
+            ], p=0.6),
+            A.OneOf([
+                A.GaussNoise(var_limit=(10.0, 60.0)),
+                A.GaussianBlur(blur_limit=(3, 5)),
+                A.MotionBlur(blur_limit=5),
+            ], p=0.25),
+        ])
+    else:
+        transforms.extend([
+            A.ColorJitter(
+                brightness=0.2,
+                contrast=0.2,
+                saturation=0.2,
+                hue=0.1,
+                p=0.5
+            ),
+            A.GaussNoise(var_limit=(10.0, 50.0), p=0.2),
+            A.GaussianBlur(blur_limit=(3, 5), p=0.2),
+        ])
+
+    return A.Compose(transforms)
 
 
-def get_val_transforms(patch_size: int = 256) -> A.Compose:
+def get_val_transforms(patch_size: int = 512) -> A.Compose:
     """
     Create validation transform pipeline.
     
